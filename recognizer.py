@@ -8,31 +8,29 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn import neighbors
 from sklearn.externals import joblib
-import hmmlearn
+from hmmlearn import hmm
 
 class EmotionRecognizer:
 
 	def __init__ (self):
-		self.neighbors = 10
-		self.weights = 'uniform'
-		self.ncomponents = 40
+		# model parameters
+		self.neighbors_knn = 10
+		self.weights_knn = 'uniform'
+		self.n_components_hmm = 40
 
-		self.temporalSequence = []
-		self.blockSizes = []
-		self.blockTags = []
-
+		# models
 		self.knn = None
 		self.hmms = None
 		
-		self.emotions = {'surprise':0, 'happy':1, 'sad':2,
-						 'anger':3,	'fear':4, 'disgust':5}
+		self.emotions = {'surprise':0, 'happy':1, 'sad':2, 'anger':3, 'fear':4, 'disgust':5}
+		self.emotionsr = ['surprise', 'happy','sad', 'anger', 'fear', 'disgust']
 
 		self.face_cascade = cv2.CascadeClassifier ('data/haarcascade_frontalface_default.xml')
 
-
-	# From a video this will calculate optical flow and returns
-	# a 2d array of optical flows each 1D array in that 2d array will 
-	# have x and y components of optical flows side by side
+	# From a video this will calculate optical flow
+	# parameters : filePath -> path of file to calculate optical flow
+	# Returns : 2d numpy array of optical flows each 1D array in that 2d array will 
+	#           have x and y components of optical flows side by side
 
 	def calculateFlow (self, filePath):
 		cap = cv2.VideoCapture (filePath)
@@ -53,8 +51,7 @@ class EmotionRecognizer:
 		grayFramep = cv2.cvtColor (frame, cv2.COLOR_BGR2GRAY)
 		faces = self.face_cascade.detectMultiScale (grayFramep, 1.3, 5)
 
-		nr, nc = faces.shape
-		if nr != 1:
+		if faces.shape[0] is not 1:
 			cap.release ()
 			print ('no faces or more than one face detected, exiting')
 			return
@@ -75,8 +72,7 @@ class EmotionRecognizer:
 			grayFrame = cv2.cvtColor (frame, cv2.COLOR_BGR2GRAY)
 			faces = face_cascade.detectMultiScale (grayFrame, 1.3, 5)
 
-			(nr, nc) = faces.shape
-			if nr != 1:
+			if nfaces.shape[0] is not 1:
 				print ('no faces or more than one face detected, exiting')
 				return
 			else:
@@ -92,15 +88,23 @@ class EmotionRecognizer:
 			flows.append (flowxy)
 
 		flows = np.array (flows)
-
 		cap.release()
-
 		return flows
 
 
 	# This calculate optical flow of video and reduce dimensions of optical flow using
-	# singular vector decomposition 
+	# singular vector decomposition and returns list of reduced optical flow and emotion for that video
+	# Parameters : fileName -> path of video to encode
+	# Returns    : list of optical flows of images in video and
+	#              emotion there in video
 	def encodeVideo (self, fileName):
+		tagname = None
+		try:
+			tagname = emotion [fileName.split ('_')[1]]
+		except 	KeyError as ke:
+			print ('no emotion for file')
+			return (None,-1)
+
 		flows = self.calculateFlow (fileName)
 
 		x_std = StandardScaler().fit_transform (flows)
@@ -109,81 +113,130 @@ class EmotionRecognizer:
 		u, s, v = np.linalg.svd (x_std)
 
 		eig_vecs = v[:,0:40]
-
 		# making transformation using eigen vectors by matrix multiplication
 		y = x_std.dot(eig_vecs)
 
-		return y
+		i = 0
+		cflows = []
+		for flow in y:
+			if i%5 == 0:
+				cflows.append (flow)
 
-	# generates temporal sequences for all videos and store it in class variable
-	# which will be used to train HMM.
+		return (cflows, tagname)
+
+	# generates temporal sequences for all videos
+	# Parameters : dataDir -> directory of training data
+	# Returns    : numpy array of temporal sequences of all videos combined,
+	#              list of sizes of videos and
+	#              list of emotions of videos.
 	def genTemporalSequence (self, dataDir):
-
 		# list of flows for each image flow in all videos
 		allFlows = []
 		# list of tags for each image flow in all videos
 		tags = []
-		self.blockSizes = []
-		self.blockTags = []
-
-		tagname = None
+		blockSizes = []
+		blockTags = []
 
 		for fileName in os.listdir (dataDir):
-			try:
-				tagname = emotion [fileName.split ('_')[1]]
-			except 	KeyError as ke:
-				print ('no emotion for file')
-				continue
+			flows, tagname = self.encodeVideo (dataDir + '/' + fileName)
+			
+			if tagname is -1: continue
 
-			tflows = self.encodeVideo (dataDir + '/' + fileName)
+			allFlows += flows
+			tags += [tagname]*len(flows)
 
-			i = 0
-			flows = []
-			for flow in tflows:
-				if i%5 == 0:
-					allFlows.append (flow)
-					tags.append (tagname)
-				i = i+1
-
-			self.blockSizes.append (tflows.size[0])
-			self.blockTags.append (tagname)
+			blockSizes.append (len(flows))
+			blockTags.append (tagname)
 
 		allFlows = np.array (allFlows)
 		tags = np.array (tags)
 
 		# train KNN using optical flows and their emotions
-		self.knn = neighbors.KNeighborsClassifier(self.nneighbours, weights=self.weights)
+		self.knn = neighbors.KNeighborsClassifier(self.neighbors_knn, weights=self.weights_knn)
 		self.knn.fit (allFlows, tags)
 
 		# test "training data" and generate a temporal sequence
-		self.temporalSequence = self.knn.predict (test)
+		temporalSequence = self.knn.predict (allFlows)
 
-		return True
+		return (temporalSequence, blockSizes, blockTags)
 
+	# Train KNN and HMM and store it in class variable
 	def train (self, dataDir):
-		self.genTemporalSequence (dataDir)
+		temporalSequence, blockSizes, blockTags = self.genTemporalSequence (dataDir)
 		train = [[],[],[],[],[],[]]
-
+		trainblocks = [[],[],[],[],[],[]]
 		pcum = 0
 		cum = 0
-		for emotion, sizes in self.blockTags, self.blockSizes:
+		for emotion, sizes in blockTags, blockSizes:
 			cum = cum + size
-			train[emotion].append (self.temporalSequence[pcum:cum-1])
+			train[emotion]  += temporalSequence[pcum:cum-1]
+			trainblocks[emotion].append (size)
 			pcum = cum
 
-		self.genTemporalSequence = []
+		genTemporalSequence = []
 
 		self.hmms = [None, None, None, None, None, None]
 
 		for i in range(0,6):
-			# hmm.learn (
-	
+			train[i] = np.array (train[i])[:,None]
+			trainblocks = np.array (trainblocks[i])[:,None]
+			self.hmms[i] = hmm.GaussianHMM(n_components=n_components_hmm, covariance_type="full", n_iter=100)
+			self.hmms[i].fit (train[i], trainblocks[i])
+
+	# Tests emotion of a single file using trained KNN and HMMs
+	# and returns whether true emotions is matched or not 
+	def testFile (self, fileName):
+		flows, tagname = self.encodeVideo (fileName)
+		flows = np.array (flows)
+		tempseq = self.knn.predict (flows)
+		mxProb = 0
+		mxProbIdx = -1
+		mxProb1 = 0
+		mxProbIdx1 = -1
+
+		for i in range(0,6):
+			x = self.hmms[i].score (tempseq)
+			if x>mxProb:
+				mxProb1 = mxProb
+				mxProbIdx1 = mxProbIdx
+				mxProb = x
+				mxProbIdx = i
+			elif x>mxProb1:
+				mxProb1 = x
+				mxProbIdx1 = i
+
+		print ('Emotion {0} with probability {1}', emotionsr[mxProbIdx], mxProb)
+		print ('Emotion {0} with probability {1}', emotionsr[mxProbIdx1], mxProb1)
+
+		if tagname is mxProbIdx:
+			return True
+		else
+			return False
+
+	# Does testing of a data in a directory
+	# Parameters : dataDir -> directory of testing videos
+	# Returs : accuracy of data
+	def test (self, dataDir):
+		if not os.path.isdir (dataDir):
+			return -1
+
+		total = 0
+		correct = 0
+		for file in os.listdir (dataDir):
+			if os.path.isfile (dataDir+'/'+file):
+				if self.testFile (dataDir+'/'+file):
+					correct = correct + 1
+				total = total + 1
+
+		return correct/total
+
 	# saves models into disk
 	def dump (self, modelDir):
 		try:
 			joblib.dump (self.knn, modelDir + '/knn.dump')
 			for key, value in self.emotions
 				joblib.dump (self.hmm[value], modelDir + '/hmm'+key+'.dump')
+			print ('dumped models to {0}', modelDir)
 		except Exception as e:
 			print ('Error in dumping models')
 			return False
@@ -196,28 +249,17 @@ class EmotionRecognizer:
 			self.knn = joblib.load (modelDir + '/knn.dump')
 			for key, value in self.emotions
 				self.hmm[value] = joblib.load (modelDir + '/hmm'+key+'.dump')
+			print ('loaded models from {0}', modelDir)
 		except Exception as e:
 			print ('Error in loading models')
 			return False
+
 		return True
-
-	def testFile (self, fileName, vis):
-		pass
-
-	def test (self, fileName):
-		if os.path.isfile (fileName):
-			for file in os.listdir (fileName):
-				self.testFile (fileName, False)
-		else:
-			self.testFile (fileName, True)
 
 def start ():
 	er = EmotionRecognizer ()
 	er.train ('data/train')
 	er.dump ('data/model')
 	# er.test ('data/test')
-
-	print('video blocks:\n', er.blocks)
-	print('temporal sequence:\n', er.temporalSequence)
 
 start ()
